@@ -1,0 +1,19 @@
+{
+  "_comment": "Strata on ExLlamaV3 (EXL3), native Windows. START-EXL3.bat sets STRATA_EXL3_RUNTIME / STRATA_EXL3_MODEL / STRATA_EXL3_TOKENIZER, writes tokenizer/ from the model folder and copies the engine into the runtime.",
+  "backend": "exl3",
+  "model_name": "EXL3",
+  "cwd": "${STRATA_EXL3_RUNTIME}",
+  "launcher": ["python/python.exe", "-u", "runtime.py", "script"],
+  "exe": "${STRATA_EXL3_RUNTIME}/strata_exl3_engine.py",
+  "tokenizer": "${STRATA_EXL3_TOKENIZER}",
+  "log": "strata-exl3.log",
+  "host": "127.0.0.1",
+  "args": [
+    "-m", "${STRATA_EXL3_MODEL}",
+    "--max-context", "65536",
+    "-cq", "4",
+    "-rcs", "4",
+    "-chunk_size", "2048"
+  ],
+  "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0}
+}

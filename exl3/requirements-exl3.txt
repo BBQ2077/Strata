@@ -1,0 +1,16 @@
+# Strata's server on the EXL3 engine: the server's own packages only (the engine runs in the EXL3 runtime's Python).
+# Pinned as upstream requirements.txt pins them; cmake / ninja are left out (nothing is compiled).
+jinja2==3.1.6
+regex==2026.9.10
+pyyaml==6.0.3
+requests==2.34.2
+pillow==12.3.0
+psutil==7.2.2
+markupsafe==3.0.3
+certifi==2026.7.22
+charset-normalizer==3.5.1
+idna==3.20
+urllib3==2.8.0
+colorama==0.4.6; sys_platform == "win32"
+# hf_tokenizer.py --check: Strata's tokenizer against the model's own tokenizer.json
+tokenizers

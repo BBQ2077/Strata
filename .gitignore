@@ -61,3 +61,9 @@ build-vision-cuda12.bat
 
 /.ccache/
 /.rocm-win/
+
+# EXL3 port: the server venv START-EXL3.bat creates
+.venv-exl3/
+
+# EXL3 port: per-machine folders for START-EXL3.bat
+exl3/local.bat

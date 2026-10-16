@@ -727,6 +727,47 @@ def btrace(*a):
 
 
 EOS_IDS = {248044, 248046}   # <|endoftext|>, <|im_end|>: the engine's default --eos-ids
+# EXL3: the program that runs a script engine (the portable runtime's python + runtime.py `script`), from the
+# config's "launcher".  Empty: `exe` is the engine program itself, as before.
+ENGINE_LAUNCHER: list[str] = []
+ENGINE_TOP_K_CAP = 64        # Strata's engine samples from at most 64 candidates; 0: no cap (the EXL3 engine)
+
+
+def engine_launcher(cfg: dict) -> list[str]:
+    """The config's "launcher": a list of strings put in front of `exe` (a relative first item, and items that name a
+    file, are the config's cwd's, as `exe` is).  Absent or empty: no launcher."""
+    v = cfg.get("launcher")
+    if v in (None, [], ""):
+        return []
+    if not isinstance(v, list) or not all(isinstance(x, str) and x for x in v):
+        raise ValueError('"launcher" must be a list of strings (the program first)')
+    here = cfg.get("cwd") or "."
+    out = []
+    for i, x in enumerate(v):
+        p = x if os.path.isabs(x) else os.path.abspath(os.path.join(here, x))
+        out.append(p if (i == 0 or os.path.isfile(p)) and not x.startswith("-") else x)
+    if not os.path.isfile(out[0]):
+        raise ValueError(f'"launcher" program not found: {out[0]}')
+    return out
+
+
+ENV_REF = re.compile(r"\$\{(\w+)\}|\$(\w+)|%(\w+)%")
+
+
+def expand_env_paths(cfg: dict) -> dict:
+    """EXL3 config: cwd, exe, tokenizer, log and the args may name environment variables (${STRATA_EXL3_RUNTIME},
+    %VAR%), expanded once at start; the file keeps them as written.  A variable left unset is an error."""
+    out = dict(cfg)
+    for k in ("cwd", "exe", "tokenizer", "log"):
+        if isinstance(out.get(k), str):
+            out[k] = os.path.expandvars(out[k])
+    if isinstance(out.get("args"), list):
+        out["args"] = [os.path.expandvars(x) if isinstance(x, str) else x for x in out["args"]]
+    for v in [out.get(k) for k in ("cwd", "exe", "tokenizer", "log")] + list(out.get("args") or []):
+        m = ENV_REF.search(v) if isinstance(v, str) else None
+        if m:
+            raise ValueError(f"environment variable not set: {next(g for g in m.groups() if g)}")
+    return out
 
 
 # The engine's own words for a verifier that cannot go on (its GPU waits were released, or an earlier window never
@@ -816,7 +857,7 @@ class StrataEngine:
         if cpus and hasattr(os, "sched_setaffinity"):    # replicas: this engine's own physical cores (serve/replicas.py)
             pin["preexec_fn"] = lambda: os.sched_setaffinity(0, cpus)
         spawned_at = time.monotonic()
-        self.proc = popen("the Strata engine", [exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
+        self.proc = popen("the Strata engine", [*ENGINE_LAUNCHER, exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env, **pin)
         contain(self.proc)                               # ends with the server, however it ends (Windows)
         # the READY read has a timeout (#1317): the lines come from a thread, up to READY, so the rest of the stream
@@ -1140,7 +1181,9 @@ class StrataEngine:
         tk = sampling.get("top_k")
         if isinstance(tk, int) and not isinstance(tk, bool) and tk >= 0:
             # the engine's sampled path keeps at most 64 candidates: 0 ("off") and wider lists get all 64
-            keys += f" top_k={tk if 1 <= tk <= 64 else 64}"
+            # (the EXL3 engine has no such limit: ENGINE_TOP_K_CAP 0 sends the value as it is)
+            cap = ENGINE_TOP_K_CAP
+            keys += f" top_k={tk if not cap or 1 <= tk <= cap else cap}"
         mp = sampling.get("min_p")
         if isinstance(mp, (int, float)) and 0.0 < float(mp) <= 1.0:
             keys += f" min_p={float(mp)!r}"
@@ -6668,6 +6711,11 @@ def main() -> int:
                          "[{\"gpus\": [0, 1]}, {\"gpus\": [2, 3]}])")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text(encoding="utf-8-sig")) if a.config else {}   # Notepad adds a BOM
+    if cfg.get("backend") == "exl3":
+        try:
+            cfg = expand_env_paths(cfg)
+        except ValueError as e:
+            ap.error(f"config {e}")
     lift_reasoning_effort_arg(cfg)
     if a.replicas is not None:
         cfg["replicas"] = a.replicas
@@ -6684,6 +6732,13 @@ def main() -> int:
     tpath = Path(a.tokenizer)
     if a.engine == "strata" and not (tpath / "vocab.json").exists():
         ap.error(f"the model's tokenizer is missing ({tpath / 'vocab.json'}); run setup again")
+    try:
+        ENGINE_LAUNCHER[:] = engine_launcher(cfg) if cfg else []
+        if cfg.get("backend") == "exl3":
+            global ENGINE_TOP_K_CAP
+            ENGINE_TOP_K_CAP = 0
+    except ValueError as e:
+        ap.error(f"config {e}")
     if (tpath / "vocab.json").exists():
         import strata_tokenizer as ST
         vocab = json.loads((tpath / "vocab.json").read_text(encoding="utf-8"))
@@ -6693,6 +6748,11 @@ def main() -> int:
         merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
         types = json.loads((tpath / "token_type.json").read_text())
         tok = ST.Tokenizer(tokens, merges, types)
+        # the stop ids of this vocabulary (EXL3 models are not all Qwen3.8-Flash-Next's): the batched path checks them
+        ends = {i for name in ("<|endoftext|>", IM_END) for i in tok.encode(name, parse_special=True)}
+        if len(ends) == 2:
+            EOS_IDS.clear()
+            EOS_IDS.update(ends)
     hub = hub_from_config(cfg, a.mcp_config)            # before the minutes of loading: a bad entry stops here
     if a.engine == "strata":
         if not cfg:
